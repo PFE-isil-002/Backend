@@ -1,0 +1,1 @@
+mission_id,step,time,target_x,target_y,target_z,real_x,real_y,real_z,vx,vy,vz,ax,ay,az,roll,pitch,yaw,wind_x,wind_y,wind_z,erreur_m,is_attack,velocity,erreur_cumulee_m,battery_level,rain,fog,snow
