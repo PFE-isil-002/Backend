@@ -8,6 +8,47 @@ import os
 def distance(p1, p2):
     return math.sqrt(sum([(a - b) ** 2 for a, b in zip(p1, p2)]))
 
+
+def generate_fixed_trajectory( n_points=21, step_size=2):
+    trajectory = []
+    x, y, z = 0, 0, -5
+    style = random.choice(["ligne_droite", "spirale", "zigzag", "montante", "descendante"])
+    if style == "ligne_droite":
+        for _ in range(n_points):
+            trajectory.append((x, y, z))
+            x += step_size
+
+    elif style == "spirale":
+        for i in range(n_points):
+            angle = i * 2 * math.pi / n_points
+            radius = 2 + 0.3 * i
+            x = radius * math.cos(angle)
+            y = radius * math.sin(angle)+i*0.1
+            z = -5 + 0.05 * i  # monte doucement
+            trajectory.append((x, y, z))
+
+    elif style == "descendante":
+        for i in range(n_points):
+            trajectory.append((x, y, z))
+            x += step_size
+            z += 0.1  # descend
+
+    elif style == "montante":
+        for i in range(n_points):
+            trajectory.append((x, y, z))
+            x += step_size
+            z -= 0.1  # monte
+
+    elif style == "zigzag":
+        for i in range(n_points):
+            y = step_size if i % 2 == 0 else -step_size
+            trajectory.append((x, y, z))
+            x += step_size
+
+    else:
+        raise ValueError("Style inconnu. Choisissez entre : ligne_droite, spirale, descendante, montante, zigzag.")
+
+    return trajectory
 SEUIL_ERREUR = 1.5
 NB_MISSIONS = 100
 BATTERY_THRESHOLD = 20  # % de batterie minimum
@@ -26,30 +67,6 @@ client.takeoffAsync().join()
 start_state = client.getMultirotorState().kinematics_estimated.position
 start_position = (start_state.x_val, start_state.y_val, start_state.z_val)
 
-waypoints = [
-        (0, 0, -5),
-        (2, 0, -5),
-        (4, 0, -5),
-        (6, 0, -5),
-        (8, 0, -5),
-        (10, 0, -5),
-        (12, 0, -5),
-        (14, 0, -5),
-        (16, 0, -5),
-        (18, 0, -5),
-        (20, 0, -5),
-        (18, 0, -5),
-        (16, 0, -5),
-        (14, 0, -5),
-        (12, 0, -5),
-        (10, 0, -5),
-        (8, 0, -5),
-        (6, 0, -5),
-        (4, 0, -5),
-        (2, 0, -5),
-        (0, 0, -5)
-    
-]
 
 client.simEnableWeather(True)
 base_wind = airsim.Vector3r(3, 2, 0.5)
@@ -92,7 +109,6 @@ with open("donnees_vol_multiple.csv", "a", newline='') as f:
             # Mettre à jour la position de départ
             start_state = client.getMultirotorState().kinematics_estimated.position
             start_position = (start_state.x_val, start_state.y_val, start_state.z_val)
-        
         rain = round(random.uniform(0, 0.2), 2)
         fog = round(random.uniform(0, 0.2), 3)
         snow = round(random.uniform(0, 0.2), 3)
@@ -106,7 +122,7 @@ with open("donnees_vol_multiple.csv", "a", newline='') as f:
 
         erreur_cumulee = 0.0
         erreurs_liste = []
-
+        waypoints=generate_fixed_trajectory()
         for target in waypoints:
             noise = airsim.Vector3r(
                 random.uniform(-0.5, 0.5),
