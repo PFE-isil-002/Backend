@@ -1,6 +1,5 @@
 from typing import Generator, AsyncGenerator, Dict
 import logging
-
 from ..domain.usecases import RealTimeMonitoringUseCase
 from ..services.model_service import ModelService
 from ..services.simulation_service import SimulationService
