@@ -14,45 +14,33 @@ sys.stdout.reconfigure(line_buffering=True)
 def distance(p1, p2):
     return math.sqrt(sum([(a - b) ** 2 for a, b in zip(p1, p2)]))
 
-def generate_fixed_trajectory(n_points=21, step_size=2):
-    trajectory = []
-    x, y, z = 0, 0, -5
-    style = random.choice(["ligne_droite", "spirale", "zigzag", "montante", "descendante"])
+waypoints = [
+    (0, 0, -5),
+    (5, 0, -5),
+    (10, 5, -5),
+    (14, 5, -5),
+    (18, 5, -5),
+    (22, 5, -5),
+    (25, 5, -5),
+    (28, 5, -5),
+    (31, 5, -5),
+    (35, 5, -5),
+    (38, 5, -5),
+    (41, 5, -5),
+    (43, 5, -5),
+    (46, 5, -5),
+    (48, 5, -5),
+    (50, 5, -5),
+    (55, 5, -5),
+    (50, 5, -5),
+    (40, 5, -5),
+    (35, 5, -5),
+    (30, 5, -5),
     
-    if style == "ligne_droite":
-        for _ in range(n_points):
-            trajectory.append((x, y, z))
-            x += step_size
-    elif style == "spirale":
-        for i in range(n_points):
-            angle = i * 2 * math.pi / n_points
-            radius = 2 + 0.3 * i
-            x = radius * math.cos(angle)
-            y = radius * math.sin(angle) + i * 0.1
-            z = -5 + 0.05 * i
-            trajectory.append((x, y, z))
-    elif style == "descendante":
-        for i in range(n_points):
-            trajectory.append((x, y, z))
-            x += step_size
-            z += 0.1
-    elif style == "montante":
-        for i in range(n_points):
-            trajectory.append((x, y, z))
-            x += step_size
-            z -= 0.1
-    elif style == "zigzag":
-        for i in range(n_points):
-            y = step_size if i % 2 == 0 else -step_size
-            trajectory.append((x, y, z))
-            x += step_size
-    else:
-        raise ValueError("Style inconnu.")
-    
-    return trajectory
+]
 
 SEUIL_ERREUR = 1.5
-NB_MISSIONS = 100
+NB_MISSIONS = 4
 BATTERY_THRESHOLD = 20
 BATTERY_DRAIN_PER_MISSION = 50
 battery_level = 100
@@ -118,7 +106,6 @@ with open("donnees_vol_multiple.csv", "a", newline='') as f:
 
         erreur_cumulee = 0.0
         erreurs_liste = []
-        waypoints = generate_fixed_trajectory()
 
         for target in waypoints:
             noise = airsim.Vector3r(

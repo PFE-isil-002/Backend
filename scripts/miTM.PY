@@ -14,18 +14,30 @@ sys.stdout.reconfigure(line_buffering=True)
 def distance(p1, p2):
     return math.sqrt(sum([(a - b) ** 2 for a, b in zip(p1, p2)]))
 
-def generate_trajectory_with_mitm(n_points=21, step_size=2):
-    trajectory = []
-    x, y, z = 0, 0, -5
-    for i in range(n_points):
-        # MITM attack simulation: random GPS spoof every few waypoints
-        if i % random.randint(5, 10) == 0 and i != 0:
-            spoof = random.uniform(-5, 5)
-            trajectory.append((x + spoof, y + spoof, z + spoof))
-        else:
-            trajectory.append((x, y, z))
-        x += step_size
-    return trajectory
+waypoints = [
+    (0, 0, -5),
+    (5, 0, -5),
+    (10, 5, -5),
+    (14, 5, -5),
+    (18, 5, -5),
+    (22, 5, -5),
+    (25, 5, -5),
+    (28, 5, -5),
+    (31, 5, -5),
+    (35, 5, -5),
+    (38, 5, -5),
+    (41, 5, -5),
+    (43, 5, -5),
+    (46, 5, -5),
+    (48, 5, -5),
+    (50, 5, -5),
+    (55, 5, -5),
+    (50, 5, -5),
+    (40, 5, -5),
+    (35, 5, -5),
+    (30, 5, -5),
+    
+]
 
 client = airsim.MultirotorClient(ip="172.17.112.1")
 client.confirmConnection()
@@ -51,9 +63,9 @@ with open("donnees_mitm.csv", "a", newline='') as f:
 
     for mission_id in range(1, 6):
         print(f"🚨 MITM Mission {mission_id} starting")
-        trajectory = generate_trajectory_with_mitm()
+        
 
-        for idx, target in enumerate(trajectory):
+        for idx, target in enumerate(waypoints):
             x, y, z = target
             spoofed = False
 
