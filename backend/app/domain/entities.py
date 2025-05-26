@@ -25,7 +25,7 @@ class SimulationType(str, Enum):
 class DronePosition:
     """Represents a drone's position in 3D space"""
     x: float
-    y: float 
+    y: float
     z: float
     timestamp: datetime
 
@@ -35,19 +35,23 @@ class DroneData:
     """Represents telemetry and features used for model prediction"""
     position: DronePosition
     velocity: Dict[str, float]
+    acceleration: Dict[str, float]
     orientation: Dict[str, float]
+    angular_velocity: Dict[str, float]
     battery: float
     signal_strength: float
     packet_loss: float
     latency: float
     # Add more features as needed
-    
+
     def to_feature_vector(self) -> List[float]:
         """Convert drone data to feature vector for model input"""
         return [
             self.position.x, self.position.y, self.position.z,
             self.velocity.get("x", 0), self.velocity.get("y", 0), self.velocity.get("z", 0),
+            self.acceleration.get("x", 0), self.acceleration.get("y", 0), self.acceleration.get("z", 0),
             self.orientation.get("pitch", 0), self.orientation.get("roll", 0), self.orientation.get("yaw", 0),
+            self.angular_velocity.get("x", 0), self.angular_velocity.get("y", 0), self.angular_velocity.get("z", 0),
             self.battery, self.signal_strength, self.packet_loss, self.latency
         ]
 

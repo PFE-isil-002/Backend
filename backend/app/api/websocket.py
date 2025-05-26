@@ -1,387 +1,291 @@
-import json
-import logging
 import asyncio
-from typing import Dict, Any, List, Optional, Callable
-from fastapi import WebSocket, WebSocketDisconnect
+import logging
+import json
+from typing import Dict, Any, Optional
+from datetime import datetime
 import uuid
-import traceback
-import time
 
-from ..schemas.response import (
-    WebSocketMessage, DroneDataMessage, DetectionResultMessage, StatusUpdateMessage, ErrorMessage
-)
-from ..domain.entities import DroneData, DetectionResult, ModelType, SimulationType
-from ..domain.usecases import RealTimeMonitoringUseCase
-from .deps import get_active_connections, get_monitoring_usecase
+from fastapi import WebSocket, WebSocketDisconnect
+from ..domain.entities import ModelType, SimulationType
+from ..services.model_service import ModelService
+from ..services.simulation_service import SimulationService
+from ..domain.usecases import RealTimeMonitoringUseCase as MonitoringUseCase
 
-# Configure module logger
-logger = logging.getLogger("app.websocket")
+logger = logging.getLogger(__name__)
 
 
 class ConnectionManager:
-    """Manages WebSocket connections and broadcasts messages"""
+    """Manages WebSocket connections and batch prediction workflow"""
 
     def __init__(self):
-        self.active_connections = get_active_connections()
-        logger.info("ConnectionManager initialized")
-    
-    async def connect(self, websocket: WebSocket) -> str:
-        """Accept a new connection and store it"""
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.connection_tasks: Dict[str, asyncio.Task] = {}
+        self.model_service = ModelService()
+        self.simulation_service = SimulationService()
+        self.monitoring_use_case = MonitoringUseCase(
+            model_use_case=self.model_service,
+            simulation_use_case=self.simulation_service
+        )
+
+    async def connect(self, websocket: WebSocket, client_id: str):
         await websocket.accept()
-        connection_id = str(uuid.uuid4())
-        self.active_connections[connection_id] = {
-            "websocket": websocket,
-            "monitoring_task": None,
-            "model_type": None,
-            "simulation_type": None,
-            "connected_at": time.time(),
-        }
-        logger.info(f"New connection established: {connection_id}")
-        logger.debug(f"Active connections: {len(self.active_connections)}")
-        return connection_id
-    
-    def disconnect(self, connection_id: str) -> None:
-        """Remove a connection"""
-        if connection_id in self.active_connections:
-            connection_data = self.active_connections[connection_id]
-            duration = time.time() - connection_data.get("connected_at", time.time())
-            logger.info(f"Connection closed: {connection_id} (duration: {duration:.2f}s)")
-            self.active_connections.pop(connection_id, None)
-            logger.debug(f"Remaining active connections: {len(self.active_connections)}")
-    
-    async def send_message(self, connection_id: str, message: WebSocketMessage) -> None:
-        """Send a message to a specific connection"""
-        if connection_id in self.active_connections:
-            websocket = self.active_connections[connection_id]["websocket"]
+        self.active_connections[client_id] = websocket
+        logger.info(f"Client {client_id} connected")
+        await self.send_message(client_id, "connection_established", {"client_id": client_id})
+
+    async def disconnect(self, client_id: str):
+        if client_id in self.active_connections:
+            del self.active_connections[client_id]
+
+        if client_id in self.connection_tasks:
+            task = self.connection_tasks[client_id]
+            if not task.done():
+                task.cancel()
+            del self.connection_tasks[client_id]
+
+        logger.info(f"Client {client_id} disconnected")
+
+    async def send_message(self, client_id: str, message_type: str, data: Any):
+        if client_id not in self.active_connections:
+            return
+
+        try:
+            # Custom JSON serializer for dataclasses if needed, or convert before calling send_message
+            # For now, we'll assume data is already pre-processed for JSON serialization
+            message = {
+                "type": message_type,
+                "data": data,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            await self.active_connections[client_id].send_text(json.dumps(message))
+            logger.info(f"Sent message to {client_id}: {message_type}")
+        except Exception as e:
+            logger.error(f"Error sending message to {client_id}: {str(e)}")
+            await self.disconnect(client_id)
+
+    async def handle_message(self, client_id: str, message: Dict[str, Any]):
+        message_type = message.get("type")
+        data = message.get("data", {})
+
+        logger.info(f"Received message from {client_id}: {message_type}")
+
+        try:
+            if message_type == "start_simulation":
+                await self.start_simulation_with_batch_prediction(client_id, data)
+            elif message_type == "stop_simulation":
+                await self.stop_simulation(client_id)
+            elif message_type == "get_model_metrics":
+                await self.send_model_metrics(client_id)
+            elif message_type == "load_model":
+                await self.load_model(client_id, data)
+            else:
+                await self.send_message(client_id, "error", {"message": f"Unknown message type: {message_type}"})
+
+        except Exception as e:
+            logger.error(f"Error handling message from {client_id}: {str(e)}")
+            await self.send_message(client_id, "error", {"message": str(e)})
+
+    async def start_simulation_with_batch_prediction(self, client_id: str, data: Dict[str, Any]):
+        simulation_type = data.get("simulation_type", "normal")
+        model_type = data.get("model_type", "knn")
+        duration = data.get("duration", 300)
+        step = data.get("step", 0.1)
+        velocity = data.get("velocity", 5.0)
+        start_point = data.get("start_point", {"x": 0.0, "y": 0.0, "z": -5.0})
+        end_point = data.get("end_point", {"x": 50.0, "y": 25.0, "z": -5.0})
+        waypoints = data.get("waypoints", [])
+
+        logger.info(f"Starting simulation for {client_id} with batch prediction")
+        logger.info(f"Parameters - simulation_type: {simulation_type}, model_type: {model_type}, duration: {duration}s, step: {step}s")
+
+        try:
+            await self.model_service.load_model(ModelType(model_type))
+            self.model_service.start_waypoint_collection()
+
+            await self.send_message(client_id, "simulation_started", {
+                "simulation_type": simulation_type,
+                "model_type": model_type,
+                "duration": duration,
+                "step": step,
+                "batch_prediction": True
+            })
+
+            task = asyncio.create_task(
+                self.run_batch_monitoring(client_id, simulation_type, duration, step, velocity,
+                                            start_point, end_point, waypoints)
+            )
+            self.connection_tasks[client_id] = task
+
+        except Exception as e:
+            logger.error(f"Error starting simulation for {client_id}: {str(e)}")
+            await self.send_message(client_id, "error", {"message": f"Simulation error: {str(e)}"})
+
+    async def run_batch_monitoring(
+        self,
+        client_id: str,
+        simulation_type: str,
+        duration: float,
+        step: float,
+        velocity: float,
+        start_point: Dict,
+        end_point: Dict,
+        waypoints: list
+    ):
+        logger.info(f"Starting batch monitoring for {client_id}")
+        start_time = datetime.utcnow()
+        data_points_processed = 0
+
+        try:
             try:
-                message_dict = message.dict()
-                msg_type = message_dict.get("type", "unknown")
-                
-                # Don't log full message content for frequent updates to avoid log spam
-                if msg_type in ["drone_data", "detection_result"]:
-                    logger.debug(f"Sending {msg_type} message to {connection_id}")
-                else:
-                    logger.info(f"Sending message to {connection_id}: {msg_type} - {message_dict}")
-                
-                await websocket.send_json(message_dict)
-            except Exception as e:
-                logger.error(f"Error sending message to connection {connection_id}: {str(e)}")
-                self.disconnect(connection_id)
-    
-    async def broadcast(self, message: WebSocketMessage) -> None:
-        """Send a message to all active connections"""
-        logger.info(f"Broadcasting message to {len(self.active_connections)} connections: {message.type}")
-        for connection_id in list(self.active_connections.keys()):
-            await self.send_message(connection_id, message)
+                sim_type = SimulationType(simulation_type.lower())
+            except ValueError:
+                logger.warning(f"Unknown simulation type '{simulation_type}', defaulting to 'normal'")
+                sim_type = SimulationType.NORMAL
 
-
-manager = ConnectionManager()
-
-
-async def handle_websocket(websocket: WebSocket):
-    """Handle WebSocket connections and messages"""
-    connection_id = await manager.connect(websocket)
-    
-    try:
-        logger.info(f"Starting websocket handler loop for connection: {connection_id}")
-        while True:
-            # Wait for a message from the client
-            logger.debug(f"Waiting for message from client: {connection_id}")
-            data = await websocket.receive_text()
-            
-            try:
-                # Parse the message
-                message = json.loads(data)
-                msg_type = message.get("type", "unknown")
-                
-                logger.info(f"Received message from {connection_id}: {msg_type}")
-                logger.debug(f"Message data: {message.get('data', {})}")
-                
-                # Process the message based on its type
-                if msg_type == "start_simulation":
-                    await handle_start_simulation(connection_id, message.get("data", {}))
-                    
-                elif msg_type == "stop_simulation":
-                    await handle_stop_simulation(connection_id)
-                    
-                elif msg_type == "ping":
-                    # Simple ping-pong to keep connection alive
-                    logger.debug(f"Ping received from {connection_id}")
-                    await manager.send_message(
-                        connection_id, 
-                        WebSocketMessage(type="pong", data={"timestamp": message.get("data", {}).get("timestamp")})
-                    )
-                    
-                else:
-                    # Unknown message type
-                    logger.warning(f"Unknown message type from {connection_id}: {msg_type}")
-                    await manager.send_message(
-                        connection_id,
-                        ErrorMessage(type="error", data={"message": f"Unknown message type: {msg_type}"})
-                    )
-                    
-            except json.JSONDecodeError:
-                # Invalid JSON
-                logger.error(f"Invalid JSON message from {connection_id}: {data[:100]}...")
-                await manager.send_message(
-                    connection_id,
-                    ErrorMessage(type="error", data={"message": "Invalid JSON message"})
-                )
-                
-            except Exception as e:
-                # Other errors
-                logger.exception(f"Error processing WebSocket message from {connection_id}")
-                await manager.send_message(
-                    connection_id,
-                    ErrorMessage(type="error", data={"message": f"Error: {str(e)}"})
-                )
-                
-    except WebSocketDisconnect:
-        # Handle client disconnect
-        logger.info(f"WebSocket disconnect detected for {connection_id}")
-        await cleanup_connection(connection_id)
-        manager.disconnect(connection_id)
-    
-    except Exception as e:
-        # Handle other errors
-        logger.exception(f"WebSocket error for {connection_id}: {str(e)}")
-        await cleanup_connection(connection_id)
-        manager.disconnect(connection_id)
-
-
-async def handle_start_simulation(connection_id: str, data: Dict[str, Any]) -> None:
-    """Handle a request to start a simulation"""
-    # Stop any existing simulation for this connection
-    logger.info(f"Starting simulation for {connection_id} with data: {data}")
-    await handle_stop_simulation(connection_id)
-    
-    try:
-        # Get parameters
-        simulation_type_str = data.get("simulation_type")
-        model_type_str = data.get("model_type")
-        duration = int(data.get("duration", 300))
-        step = float(data.get("step", 0.1))
-        
-        # Log parameters
-        logger.info(f"Simulation parameters - simulation_type: {simulation_type_str}, model_type: {model_type_str}, duration: {duration}s, step: {step}s")
-        
-        # Validate parameters
-        if not simulation_type_str or not model_type_str:
-            logger.error(f"Missing required parameters for {connection_id}")
-            raise ValueError("simulation_type and model_type are required")
-        
-        simulation_type = SimulationType(simulation_type_str)
-        model_type = ModelType(model_type_str)
-        
-        # Get monitoring use case
-        monitoring_usecase = get_monitoring_usecase()
-        logger.debug(f"Monitoring usecase retrieved for {connection_id}")
-        
-        # Update connection info
-        manager.active_connections[connection_id]["model_type"] = model_type
-        manager.active_connections[connection_id]["simulation_type"] = simulation_type
-        
-        # Define callback for data updates
-        def update_callback(drone_data: DroneData, detection_result: DetectionResult) -> None:
-            # This runs in the monitoring task, so we need to create a task to send messages
-            logger.debug(f"Callback triggered with drone data and detection result for {connection_id}")
-            asyncio.create_task(send_update(connection_id, drone_data, detection_result))
-        
-        # Register the callback
-        monitoring_usecase.register_callback(update_callback)
-        logger.debug(f"Callback registered for {connection_id}")
-        
-        # Create and store the monitoring task
-        logger.info(f"Creating monitoring task for {connection_id}")
-        task = asyncio.create_task(
-            run_monitoring(
-                connection_id=connection_id,
-                monitoring_usecase=monitoring_usecase,
-                simulation_type=simulation_type,
-                model_type=model_type,
+            async for drone_data in self.simulation_service.start_simulation(
+                simulation_type=sim_type,
                 duration=duration,
-                step=step
-            )
-        )
-        
-        manager.active_connections[connection_id]["monitoring_task"] = task
-        
-        # Send confirmation to client
-        logger.info(f"Simulation started for {connection_id}")
-        await manager.send_message(
-            connection_id,
-            WebSocketMessage(
-                type="simulation_started",
-                data={
-                    "simulation_type": simulation_type.value,
-                    "model_type": model_type.value,
-                    "duration": duration,
-                    "step": step
-                }
-            )
-        )
-        
-    except ValueError as e:
-        # Parameter validation error
-        logger.error(f"Invalid parameters for {connection_id}: {str(e)}")
-        await manager.send_message(
-            connection_id,
-            ErrorMessage(type="error", data={"message": f"Invalid parameters: {str(e)}"})
-        )
-        
-    except Exception as e:
-        # Other errors
-        logger.exception(f"Error starting simulation for {connection_id}")
-        await manager.send_message(
-            connection_id,
-            ErrorMessage(type="error", data={"message": f"Error starting simulation: {str(e)}"})
-        )
+                step=step,
+                velocity=velocity,
+                start_point=start_point,
+                end_point=end_point,
+                waypoints=waypoints
+            ):
+                self.model_service.add_waypoint(drone_data)
+                data_points_processed += 1
 
-
-async def handle_stop_simulation(connection_id: str) -> None:
-    """Handle a request to stop a simulation"""
-    logger.info(f"Stopping simulation for {connection_id}")
-    await cleanup_connection(connection_id)
-    
-    # Send confirmation to client
-    await manager.send_message(
-        connection_id,
-        WebSocketMessage(type="simulation_stopped", data={})
-    )
-    logger.info(f"Simulation stopped for {connection_id}")
-
-
-async def cleanup_connection(connection_id: str) -> None:
-    """Clean up tasks and resources for a connection"""
-    logger.info(f"Cleaning up connection {connection_id}")
-    # Cancel the monitoring task if it exists
-    if connection_id in manager.active_connections:
-        task = manager.active_connections[connection_id].get("monitoring_task")
-        if task and not task.done():
-            logger.debug(f"Cancelling monitoring task for {connection_id}")
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                logger.debug(f"Monitoring task cancelled for {connection_id}")
-            except Exception as e:
-                logger.error(f"Error while cancelling task for {connection_id}: {str(e)}")
-            
-        # Reset connection info
-        logger.debug(f"Resetting connection info for {connection_id}")
-        manager.active_connections[connection_id]["monitoring_task"] = None
-        manager.active_connections[connection_id]["model_type"] = None
-        manager.active_connections[connection_id]["simulation_type"] = None
-
-
-async def run_monitoring(
-    connection_id: str,
-    monitoring_usecase: RealTimeMonitoringUseCase,
-    simulation_type: SimulationType,
-    model_type: ModelType,
-    duration: int,
-    step: float
-) -> None:
-    """Run the monitoring process in the background"""
-    logger.info(f"Starting monitoring for {connection_id} - simulation: {simulation_type.value}, model: {model_type.value}")
-    start_time = time.time()
-    data_count = 0
-    
-    try:
-        logger.debug(f"Initiating monitoring stream for {connection_id}")
-        async for drone_data, detection_result in monitoring_usecase.start_monitoring(
-            simulation_type=simulation_type,
-            model_type=model_type,
-            duration=duration,
-            step=step
-        ):
-            # The callback will handle sending updates to the client
-            data_count += 1
-            
-            # Log data at appropriate intervals to avoid excessive logging
-            if data_count % 10 == 0:  # Log every 10th data point
-                logger.info(f"Processed {data_count} data points for {connection_id} ({time.time() - start_time:.2f}s elapsed)")
-            
-            logger.debug(f"Data point {data_count}: position=({drone_data.position.x:.2f}, {drone_data.position.y:.2f}, {drone_data.position.z:.2f}), anomaly={detection_result.is_anomaly}")
-            
-    except asyncio.CancelledError:
-        # Handle cancellation
-        logger.info(f"Monitoring task cancelled for {connection_id} after {data_count} data points")
-        await monitoring_usecase.stop_monitoring()
-        raise
-        
-    except Exception as e:
-        # Handle other errors
-        logger.exception(f"Error in monitoring task for {connection_id}: {str(e)}")
-        if connection_id in manager.active_connections:
-            await manager.send_message(
-                connection_id,
-                ErrorMessage(type="error", data={"message": f"Monitoring error: {str(e)}"})
-            )
-    
-    finally:
-        # Ensure the monitoring is stopped
-        logger.info(f"Finalizing monitoring for {connection_id} after {time.time() - start_time:.2f}s")
-        await monitoring_usecase.stop_monitoring()
-        
-        # Send simulation complete message if the connection still exists
-        if connection_id in manager.active_connections:
-            logger.info(f"Simulation complete for {connection_id}, processed {data_count} data points")
-            await manager.send_message(
-                connection_id,
-                WebSocketMessage(type="simulation_complete", data={
-                    "processed_data_points": data_count,
-                    "total_duration": time.time() - start_time
-                })
-            )
-
-
-async def send_update(connection_id: str, drone_data: DroneData, detection_result: DetectionResult) -> None:
-    """Send updates to the client"""
-    # Check if the connection still exists
-    if connection_id not in manager.active_connections:
-        logger.debug(f"Connection {connection_id} no longer exists, skipping update")
-        return
-    
-    # For anomaly detections, increase log level
-    if detection_result.is_anomaly:
-        logger.info(f"ANOMALY DETECTED for {connection_id} - confidence: {detection_result.confidence}, type: {detection_result.detection_type}")
-    
-    # Send drone data update
-    try:
-        await manager.send_message(
-            connection_id,
-            DroneDataMessage(
-                type="drone_data",
-                data={
-                    "position": {
-                        "x": drone_data.position.x,
-                        "y": drone_data.position.y,
-                        "z": drone_data.position.z,
+                if data_points_processed % 50 == 0:
+                    await self.send_message(client_id, "waypoint_collected", {
+                        "waypoints_collected": self.model_service.get_collected_waypoints_count(),
+                        # Convert DronePosition object to a dictionary for JSON serialization
+                        "current_position": {
+                            "x": drone_data.position.x,
+                            "y": drone_data.position.y,
+                            "z": drone_data.position.z,
+                            "timestamp": drone_data.position.timestamp.isoformat()
+                        },
                         "timestamp": drone_data.position.timestamp.isoformat()
-                    },
-                    "velocity": drone_data.velocity,
-                    "orientation": drone_data.orientation,
-                    "battery": drone_data.battery,
-                    "signal_strength": drone_data.signal_strength,
-                    "packet_loss": drone_data.packet_loss,
-                    "latency": drone_data.latency
-                }
-            )
-        )
-        
-        # Send detection result update
-        await manager.send_message(
-            connection_id,
-            DetectionResultMessage(
-                type="detection_result",
-                data={
-                    "is_anomaly": detection_result.is_anomaly,
+                    })
+
+                if data_points_processed % 10 == 0:
+                    await asyncio.sleep(0.01)
+
+            logger.info(f"Collected {data_points_processed} waypoints for batch prediction")
+
+            await self.send_message(client_id, "analyzing_flight", {
+                "total_waypoints": data_points_processed,
+                "message": "Analyzing complete flight path..."
+            })
+
+            detection_result = await self.model_service.predict_batch()
+
+            end_time = datetime.utcnow()
+            total_duration = (end_time - start_time).total_seconds()
+
+            await self.send_message(client_id, "batch_prediction_complete", {
+                "detection_result": {
+                    "is_anomaly": bool(detection_result.is_anomaly), # Explicitly cast to bool
                     "confidence": detection_result.confidence,
                     "detection_type": detection_result.detection_type,
                     "details": detection_result.details
+                },
+                "waypoints_analyzed": data_points_processed,
+                "analysis_duration": total_duration,
+                "flight_summary": {
+                    "start_time": start_time.isoformat(),
+                    "end_time": end_time.isoformat(),
+                    "total_waypoints": data_points_processed,
+                    "avg_waypoints_per_second": data_points_processed / total_duration if total_duration > 0 else 0
                 }
-            )
-        )
+            })
+
+            await self.send_message(client_id, "simulation_complete", {
+                "processed_data_points": data_points_processed,
+                "total_duration": total_duration,
+                "prediction_method": "batch",
+                "final_result": {
+                    "threat_detected": bool(detection_result.is_anomaly), # Explicitly cast to bool
+                    "threat_type": detection_result.detection_type,
+                    "confidence": detection_result.confidence
+                }
+            })
+
+        except Exception as e:
+            logger.error(f"Error in batch monitoring for {client_id}: {str(e)}")
+            await self.send_message(client_id, "error", {"message": f"Monitoring error: {str(e)}"})
+
+        finally:
+            logger.info(f"Finalizing batch monitoring for {client_id}")
+            self.model_service.clear_waypoint_buffer()
+
+            if client_id in self.connection_tasks:
+                del self.connection_tasks[client_id]
+
+    async def stop_simulation(self, client_id: str):
+        logger.info(f"Stopping simulation for {client_id}")
+
+        if client_id in self.connection_tasks:
+            task = self.connection_tasks[client_id]
+            if not task.done():
+                task.cancel()
+            del self.connection_tasks[client_id]
+
+        await self.simulation_service.stop_simulation()
+        self.model_service.clear_waypoint_buffer()
+
+        await self.send_message(client_id, "simulation_stopped", {})
+
+    async def load_model(self, client_id: str, data: Dict[str, Any]):
+        model_type = data.get("model_type")
+        if not model_type:
+            await self.send_message(client_id, "error", {"message": "Missing model_type"})
+            return
+
+        try:
+            await self.model_service.load_model(ModelType(model_type))
+            await self.send_message(client_id, "model_loaded", {
+                "model_type": model_type,
+                "status": "success"
+            })
+        except Exception as e:
+            await self.send_message(client_id, "error", {"message": f"Failed to load model: {str(e)}"})
+
+    async def send_model_metrics(self, client_id: str):
+        metrics = self.model_service.get_model_metrics()
+        await self.send_message(client_id, "model_metrics", metrics)
+
+
+# Global WebSocket manager instance
+manager = ConnectionManager()
+
+
+async def websocket_endpoint(websocket: WebSocket):
+    client_id = str(uuid.uuid4())
+
+    try:
+        await manager.connect(websocket, client_id)
+
+        while True:
+            try:
+                data = await websocket.receive_text()
+                message = json.loads(data)
+                await manager.handle_message(client_id, message)
+
+            except WebSocketDisconnect:
+                logger.info(f"Client {client_id} disconnected normally")
+                break
+            except json.JSONDecodeError:
+                await manager.send_message(client_id, "error", {"message": "Invalid JSON format"})
+            except Exception as e:
+                logger.error(f"Error in websocket for {client_id}: {str(e)}")
+                await manager.send_message(client_id, "error", {"message": str(e)})
+
     except Exception as e:
-        logger.error(f"Error sending update to {connection_id}: {str(e)}")
+        logger.error(f"WebSocket connection error for {client_id}: {str(e)}")
+
+    finally:
+        await manager.disconnect(client_id)
+
+
+# Alias for FastAPI to use in routing
+handle_websocket = websocket_endpoint
