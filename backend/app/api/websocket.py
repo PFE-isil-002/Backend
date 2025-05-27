@@ -26,6 +26,8 @@ class ConnectionManager:
             model_use_case=self.model_service,
             simulation_use_case=self.simulation_service
         )
+        # Register the callback for outsider drone status
+        self.simulation_service.set_outsider_status_callback(self._send_outsider_status_to_client)
 
     async def connect(self, websocket: WebSocket, client_id: str):
         await websocket.accept()
@@ -220,6 +222,11 @@ class ConnectionManager:
 
             if client_id in self.connection_tasks:
                 del self.connection_tasks[client_id]
+
+    async def _send_outsider_status_to_client(self, status_data: Dict[str, Any]):
+        """Callback to send outsider drone status to all active clients."""
+        for client_id in self.active_connections:
+            await self.send_message(client_id, "outsider_status", status_data)
 
     async def stop_simulation(self, client_id: str):
         logger.info(f"Stopping simulation for {client_id}")

@@ -18,15 +18,9 @@ class SimulationRequest(BaseModel):
     model_type: ModelType = Field(..., description="Type of model to use for detection")
     duration: Optional[int] = Field(300, description="Duration of simulation in seconds")
     step: Optional[float] = Field(0.1, description="Time step interval in seconds")
-    
-    # New fields for custom flight path
     start_point: Optional[Position] = Field(None, description="Starting position for the drone")
     end_point: Optional[Position] = Field(None, description="Ending position for the drone")
-    
-    # Optional waypoints for complex paths
     waypoints: Optional[List[Position]] = Field(None, description="Intermediate waypoints between start and end")
-    
-    # Flight parameters
     velocity: Optional[float] = Field(5.0, description="Flight velocity in m/s", ge=1.0, le=15.0)
     
     @validator('waypoints')

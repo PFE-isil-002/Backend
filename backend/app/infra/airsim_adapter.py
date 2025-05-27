@@ -5,9 +5,9 @@ from typing import AsyncIterator, Dict, Any, Optional, List, Tuple
 from pathlib import Path
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from ..domain.entities import DroneData, SimulationType, DronePosition
+from ..domain.entities import AuthenticationRequest, DroneData, OutsiderDroneData, SimulationType, DronePosition
 from ..core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -18,6 +18,179 @@ class AirSimAdapter:
     def __init__(self):
         self.current_process: Optional[subprocess.Popen] = None
         self.simulation_active = False
+        self.outsider_drone_active = False
+        self.outsider_authentication_attempted = False
+        self.outsider_communication_blocked = False
+        self.outsider_appearance_time = None
+        self.outsider_drone_data = None
+        self.authentication_callback = None
+        
+    def set_authentication_callback(self, callback):
+        """Set callback function for AI model authentication"""
+        self.authentication_callback = callback
+
+    def _generate_outsider_flight_history(self, current_time: float, outsider_start_pos: Dict[str, float]) -> List[DronePosition]:
+        """Generate suspicious flight history for outsider drone"""
+        history = []
+        
+        # Generate 15-20 historical positions showing erratic/suspicious behavior
+        num_history_points = 18
+        base_time = current_time - (num_history_points * 2.0)  # 2 seconds apart
+        
+        for i in range(num_history_points):
+            timestamp = datetime.utcnow() - timedelta(seconds=(num_history_points - i) * 2)
+            
+            # Start from a distant location and move erratically
+            progress = i / num_history_points
+            
+            # Suspicious pattern: starts far away, moves in erratic circles, then approaches
+            if progress < 0.3:
+                # Phase 1: Far away, erratic movement
+                base_x = outsider_start_pos['x'] - 80.0 + progress * 30.0
+                base_y = outsider_start_pos['y'] - 60.0 + progress * 20.0
+                base_z = outsider_start_pos['z'] - 15.0
+                
+                # Add erratic circular motion
+                erratic_radius = 25.0 * (1 - progress)
+                angle = progress * math.pi * 8  # Multiple circles
+                x = base_x + erratic_radius * math.cos(angle)
+                y = base_y + erratic_radius * math.sin(angle)
+                z = base_z + 5.0 * math.sin(progress * math.pi * 6)
+                
+            elif progress < 0.7:
+                # Phase 2: Rapid approach with sudden direction changes
+                approach_progress = (progress - 0.3) / 0.4
+                
+                x = outsider_start_pos['x'] - 50.0 + approach_progress * 40.0
+                y = outsider_start_pos['y'] - 40.0 + approach_progress * 30.0
+                z = outsider_start_pos['z'] - 10.0 + approach_progress * 5.0
+                
+                # Add sudden direction changes (zigzag pattern)
+                if int(approach_progress * 10) % 2 == 0:
+                    x += 15.0 * math.sin(approach_progress * math.pi * 4)
+                    y += 12.0 * math.cos(approach_progress * math.pi * 3)
+                else:
+                    x -= 10.0 * math.sin(approach_progress * math.pi * 5)
+                    y -= 8.0 * math.cos(approach_progress * math.pi * 4)
+                    
+            else:
+                # Phase 3: Final approach - more direct but still suspicious
+                final_progress = (progress - 0.7) / 0.3
+                x = outsider_start_pos['x'] - 10.0 + final_progress * 10.0
+                y = outsider_start_pos['y'] - 10.0 + final_progress * 10.0
+                z = outsider_start_pos['z'] - 5.0 + final_progress * 5.0
+                
+                # Small evasive maneuvers
+                x += 3.0 * math.sin(final_progress * math.pi * 12)
+                y += 2.0 * math.cos(final_progress * math.pi * 10)
+            
+            history.append(DronePosition(x=x, y=y, z=z, timestamp=timestamp))
+        
+        logger.info(f"Generated outsider flight history with {len(history)} suspicious waypoints")
+        return history
+
+    def _should_trigger_outsider_authentication(self, current_time: float, total_duration: float) -> bool:
+        """Determine if outsider drone should appear and request authentication"""
+        if self.outsider_authentication_attempted:
+            return False
+            
+        # Trigger between 30% and 60% of flight time, randomly
+        min_trigger_time = total_duration * 0.3
+        max_trigger_time = total_duration * 0.6
+        
+        # Use a random seed based on current time for consistency
+        random_seed = int(current_time * 1000) % 1000
+        trigger_time = min_trigger_time + (random_seed / 1000.0) * (max_trigger_time - min_trigger_time)
+        
+        return current_time >= trigger_time
+
+    async def _handle_outsider_authentication(
+        self, 
+        current_time: float, 
+        main_drone_pos: Tuple[float, float, float],
+        outsider_pos: Tuple[float, float, float],
+        outsider_start_pos: Dict[str, float]
+    ) -> Optional[OutsiderDroneData]:
+        """Handle outsider drone authentication process"""
+        
+        if not self.outsider_authentication_attempted:
+            self.outsider_authentication_attempted = True
+            self.outsider_appearance_time = current_time
+            
+            # Generate outsider drone data with suspicious flight history
+            flight_history = self._generate_outsider_flight_history(current_time, outsider_start_pos)
+            
+            outsider_data = OutsiderDroneData(
+                drone_id=f"OUTSIDER_{int(current_time * 100)}",
+                position=DronePosition(x=outsider_pos[0], y=outsider_pos[1], z=outsider_pos[2], timestamp=datetime.utcnow()),
+                velocity={"x": 8.5, "y": -6.2, "z": 1.1},
+                acceleration={"x": 2.1, "y": -1.8, "z": 0.5},
+                orientation={"pitch": 12.0, "roll": -8.0, "yaw": 245.0},
+                angular_velocity={"x": 0.3, "y": -0.2, "z": 0.8},
+                battery=85.0,
+                signal_strength=-72.0,
+                packet_loss=0.15,
+                latency=0.08,
+                flight_history=flight_history,
+                authentication_timestamp=datetime.utcnow()
+            )
+            
+            # Create authentication request
+            auth_request = AuthenticationRequest(
+                drone_id=outsider_data.drone_id,
+                flight_history=flight_history,
+                request_timestamp=datetime.utcnow(),
+                source_position=outsider_data.position
+            )
+            
+            logger.warning("="*80)
+            logger.warning(" OUTSIDER DRONE DETECTED!")
+            logger.warning(f"   Drone ID: {outsider_data.drone_id}")
+            logger.warning(f"   Position: ({outsider_pos[0]:.2f}, {outsider_pos[1]:.2f}, {outsider_pos[2]:.2f})")
+            logger.warning(f"   Distance from main drone: {math.dist(main_drone_pos, outsider_pos):.2f} units")
+            logger.warning("="*80)
+            
+            logger.info(" AUTHENTICATION REQUEST INITIATED")
+            logger.info(f" Request Details:")
+            logger.info(f"   - Drone ID: {auth_request.drone_id}")
+            logger.info(f"   - Flight History Points: {len(auth_request.flight_history)}")
+            logger.info(f"   - Request Time: {auth_request.request_timestamp}")
+            
+            # Send to AI model for authentication if callback is available
+            if self.authentication_callback:
+                try:
+                    logger.info(" Sending authentication request to AI model...")
+                    auth_response = await self.authentication_callback(auth_request, outsider_data)
+                    
+                    logger.info(" AUTHENTICATION RESPONSE RECEIVED")
+                    logger.info(f"   - Is Authenticated: {auth_response.is_authenticated}")
+                    logger.info(f"   - Is Outsider: {auth_response.is_outsider}")
+                    logger.info(f"   - Confidence: {auth_response.confidence:.2f}")
+                    logger.info(f"   - Communication Blocked: {auth_response.communication_blocked}")
+                    
+                    if auth_response.is_outsider:
+                        self.outsider_communication_blocked = True
+                        logger.error(" COMMUNICATION BLOCKED - OUTSIDER DRONE DETECTED!")
+                        logger.error("   AI Model classified this drone as an OUTSIDER")
+                        logger.error(f"   Detection confidence: {auth_response.confidence:.2f}")
+                    else:
+                        logger.info(" Authentication successful - Communication allowed")
+                        
+                except Exception as e:
+                    logger.error(f" Authentication failed: {str(e)}")
+                    # Default to blocking communication on error
+                    self.outsider_communication_blocked = True
+                    logger.error(" COMMUNICATION BLOCKED - Authentication system error")
+            else:
+                logger.warning("  No authentication callback available - Blocking by default")
+                self.outsider_communication_blocked = True
+            
+            self.outsider_drone_data = outsider_data
+            self.outsider_drone_active = True
+            
+            return outsider_data
+        
+        return self.outsider_drone_data
 
     async def start_simulation(
         self,
@@ -284,9 +457,9 @@ class AirSimAdapter:
         # MITM attack state - Enhanced for more noticeable deviation
         mitm_active = False
         hijack_start = None
-        hijack_duration = 25.0  # Increased duration for more noticeable hijack
+        hijack_duration = 25.0  
         orig_pos = None
-        hijack_target = None  # Target position for deviation
+        hijack_target = None  
 
         # Outsider drone state
         outsider_path = None
@@ -303,7 +476,7 @@ class AirSimAdapter:
         )
         
         # Much slower effective velocity
-        effective_velocity = velocity * 0.4  # 60% slower than before (was 0.7, now 0.4)
+        effective_velocity = velocity * 0.4  
         estimated_flight_time = total_dist / effective_velocity if effective_velocity > 0 else duration
         
         logger.info(f"Total distance: {total_dist:.2f}, Estimated flight time: {estimated_flight_time:.2f}s")
@@ -345,16 +518,16 @@ class AirSimAdapter:
 
                 # Handle outsider drone simulation
                 if simulation_type == SimulationType.OUTSIDER and outsider_path:
-                    # Calculate outsider drone position
+            
                     outsider_total_dist = sum(
-                        math.dist(outsider_path[i], outsider_path[i+1])
-                        for i in range(len(outsider_path)-1)
-                    )
-                    
-                    outsider_dist_cov = current_time * effective_velocity * 1.1  # Slightly faster to catch up
-                    
+                    math.dist(outsider_path[i], outsider_path[i+1])
+                    for i in range(len(outsider_path)-1)
+                     )
+            
+                    outsider_dist_cov = current_time * effective_velocity * 1.1  
+            
                     if outsider_total_dist > 0 and outsider_dist_cov < outsider_total_dist:
-                        # Find outsider position along its path
+                     
                         cum = 0.0
                         for idx in range(len(outsider_path)-1):
                             p1, p2 = outsider_path[idx], outsider_path[idx+1]
@@ -370,32 +543,48 @@ class AirSimAdapter:
                             outsider_x, outsider_y, outsider_z = outsider_path[-1]
                     else:
                         outsider_x, outsider_y, outsider_z = outsider_path[-1] if outsider_path else (x, y, z)
+            
                     
-                    # Calculate influence of outsider drone on main drone
+                    if self._should_trigger_outsider_authentication(current_time, duration):
+                        outsider_drone_data = await self._handle_outsider_authentication(
+                            current_time, 
+                            (x, y, z), 
+                            (outsider_x, outsider_y, outsider_z),
+                            outsider_start_pos
+                        )
+            
+                    
                     distance_to_outsider = math.sqrt(
-                        (x - outsider_x)**2 + (y - outsider_y)**2 + (z - outsider_z)**2
+                    (x - outsider_x)**2 + (y - outsider_y)**2 + (z - outsider_z)**2
                     )
+            
                     
-                    # When outsider is close, create interference/confusion
-                    if distance_to_outsider < 20.0:  # Within 20 units
+                    if distance_to_outsider < 20.0:  
                         interference_factor = (20.0 - distance_to_outsider) / 20.0
-                        logger.info(f"Outsider drone interference: distance={distance_to_outsider:.2f}, factor={interference_factor:.2f}")
+                
                         
-                        # Create erratic behavior when outsider is nearby
+                        if self.outsider_drone_active:
+                            logger.info(f" OUTSIDER INTERFERENCE: distance={distance_to_outsider:.2f}, factor={interference_factor:.2f}")
+                            if self.outsider_communication_blocked:
+                                logger.warning(" Communication with outsider BLOCKED")
+                            else:
+                                logger.info(" Communication with outsider ACTIVE")
+                
+                        
                         x += interference_factor * 8.0 * math.sin(current_time * 3.0)
                         y += interference_factor * 6.0 * math.cos(current_time * 2.5)
                         z += interference_factor * 3.0 * math.sin(current_time * 4.0)
+                
                         
-                        # Add oscillating movement as drones "interact"
                         phase_shift = current_time * 2.0
                         x += interference_factor * 5.0 * math.cos(phase_shift)
                         y += interference_factor * 5.0 * math.sin(phase_shift)
                 
-                # Enhanced MITM logic with more dramatic path deviation
+               
                 elif simulation_type == SimulationType.MITM and not reached_end:
                     prog = dist_cov / total_dist if total_dist > 0 else current_time / duration
                     
-                    # Start hijack between 25% and 70% of flight progress
+                    
                     if 0.25 <= prog <= 0.7 and not mitm_active and hijack_start is None:
                         mitm_active = True
                         hijack_start = current_time
