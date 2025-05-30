@@ -283,7 +283,7 @@ class AirSimAdapter:
         # Calculate the vector from start to end for the main drone
         dx = main_end['x'] - main_start['x']
         dy = main_end['y'] - main_start['y']
-        perp_distance = 140.0  
+        perp_distance = 190.0  
         
         # Calculate perpendicular vector
         length = math.sqrt(dx*dx + dy*dy)
