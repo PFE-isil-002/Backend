@@ -29,65 +29,76 @@ class AirSimAdapter:
         """Set callback function for AI model authentication"""
         self.authentication_callback = callback
 
-    def _generate_outsider_flight_history(self, current_time: float, outsider_start_pos: Dict[str, float]) -> List[DronePosition]:
-        """Generate suspicious flight history for outsider drone"""
-        history = []
+    def _generate_outsider_flight_history(self, current_time: float, outsider_current_pos: Dict[str, float], outsider_start_pos: Dict[str, float]) -> List[DronePosition]:
+            """Generate suspicious flight history for outsider drone up to its current position"""
+            history = []
+    
+            # Generate 15-20 historical positions showing erratic/suspicious behavior
+            num_history_points = 18
+            base_time = current_time - (num_history_points * 2.0)  # 2 seconds apart
+    
+            for i in range(num_history_points):
+                timestamp = datetime.utcnow() - timedelta(seconds=(num_history_points - i) * 2)
         
-        # Generate 15-20 historical positions showing erratic/suspicious behavior
-        num_history_points = 18
-        base_time = current_time - (num_history_points * 2.0)  # 2 seconds apart
+                # Progress from start to current position (not just start position)
+                progress = i / num_history_points
         
-        for i in range(num_history_points):
-            timestamp = datetime.utcnow() - timedelta(seconds=(num_history_points - i) * 2)
+                # Calculate base trajectory from start to current position
+                base_x = outsider_start_pos['x'] + progress * (outsider_current_pos['x'] - outsider_start_pos['x'])
+                base_y = outsider_start_pos['y'] + progress * (outsider_current_pos['y'] - outsider_start_pos['y'])
+                base_z = outsider_start_pos['z'] + progress * (outsider_current_pos['z'] - outsider_start_pos['z'])
+        
+                # Add suspicious behavior patterns along the trajectory
+                if progress < 0.3:
+                    # Phase 1: Erratic movement near start position
+                    erratic_radius = 25.0 * (1 - progress)
+                    angle = progress * math.pi * 8  # Multiple circles
+                    x = base_x + erratic_radius * math.cos(angle)
+                    y = base_y + erratic_radius * math.sin(angle)
+                    z = base_z + 5.0 * math.sin(progress * math.pi * 6)
             
-            # Start from a distant location and move erratically
-            progress = i / num_history_points
+                elif progress < 0.7:
+                    # Phase 2: Rapid approach with sudden direction changes
+                    approach_progress = (progress - 0.3) / 0.4
             
-            # Suspicious pattern: starts far away, moves in erratic circles, then approaches
-            if progress < 0.3:
-                # Phase 1: Far away, erratic movement
-                base_x = outsider_start_pos['x'] - 80.0 + progress * 30.0
-                base_y = outsider_start_pos['y'] - 60.0 + progress * 20.0
-                base_z = outsider_start_pos['z'] - 15.0
+                    # Add zigzag pattern while moving toward current position
+                    if int(approach_progress * 10) % 2 == 0:
+                        x = base_x + 15.0 * math.sin(approach_progress * math.pi * 4)
+                        y = base_y + 12.0 * math.cos(approach_progress * math.pi * 3)
+                        z = base_z
+                    else:
+                        x = base_x - 10.0 * math.sin(approach_progress * math.pi * 5)
+                        y = base_y - 8.0 * math.cos(approach_progress * math.pi * 4)
+                        z = base_z # This was missing in the original code
                 
-                # Add erratic circular motion
-                erratic_radius = 25.0 * (1 - progress)
-                angle = progress * math.pi * 8  # Multiple circles
-                x = base_x + erratic_radius * math.cos(angle)
-                y = base_y + erratic_radius * math.sin(angle)
-                z = base_z + 5.0 * math.sin(progress * math.pi * 6)
-                
-            elif progress < 0.7:
-                # Phase 2: Rapid approach with sudden direction changes
-                approach_progress = (progress - 0.3) / 0.4
-                
-                x = outsider_start_pos['x'] - 50.0 + approach_progress * 40.0
-                y = outsider_start_pos['y'] - 40.0 + approach_progress * 30.0
-                z = outsider_start_pos['z'] - 10.0 + approach_progress * 5.0
-                
-                # Add sudden direction changes (zigzag pattern)
-                if int(approach_progress * 10) % 2 == 0:
-                    x += 15.0 * math.sin(approach_progress * math.pi * 4)
-                    y += 12.0 * math.cos(approach_progress * math.pi * 3)
                 else:
-                    x -= 10.0 * math.sin(approach_progress * math.pi * 5)
-                    y -= 8.0 * math.cos(approach_progress * math.pi * 4)
-                    
-            else:
-                # Phase 3: Final approach - more direct but still suspicious
-                final_progress = (progress - 0.7) / 0.3
-                x = outsider_start_pos['x'] - 10.0 + final_progress * 10.0
-                y = outsider_start_pos['y'] - 10.0 + final_progress * 10.0
-                z = outsider_start_pos['z'] - 5.0 + final_progress * 5.0
-                
-                # Small evasive maneuvers
-                x += 3.0 * math.sin(final_progress * math.pi * 12)
-                y += 2.0 * math.cos(final_progress * math.pi * 10)
+                    # Phase 3: Final approach to current position - more direct but still suspicious
+                    final_progress = (progress - 0.7) / 0.3
             
-            history.append(DronePosition(x=x, y=y, z=z, timestamp=timestamp))
+                    # Move closer to actual current position with small evasive maneuvers
+                    x = base_x + 3.0 * math.sin(final_progress * math.pi * 12)
+                    y = base_y + 2.0 * math.cos(final_progress * math.pi * 10)
+                    z = base_z
         
-        logger.info(f"Generated outsider flight history with {len(history)} suspicious waypoints")
-        return history
+                history.append(DronePosition(x=x, y=y, z=z, timestamp=timestamp))
+    
+            # Ensure the last position in history is very close to the current position
+            # This represents the most recent known position before authentication request
+            recent_timestamp = datetime.utcnow() - timedelta(seconds=1)
+            recent_pos = DronePosition(
+                x=outsider_current_pos['x'] + 1.0 * math.sin(current_time),  # Small deviation
+                y=outsider_current_pos['y'] + 0.8 * math.cos(current_time),
+                z=outsider_current_pos['z'] + 0.5 * math.sin(current_time * 2),
+                timestamp=recent_timestamp
+            )
+            history.append(recent_pos)
+    
+            logger.info(f"Generated outsider flight history with {len(history)} suspicious waypoints ending near current position")
+            logger.info(f"History start: ({history[0].x:.2f}, {history[0].y:.2f}, {history[0].z:.2f})")
+            logger.info(f"History end: ({history[-1].x:.2f}, {history[-1].y:.2f}, {history[-1].z:.2f})")
+            logger.info(f"Current pos: ({outsider_current_pos['x']:.2f}, {outsider_current_pos['y']:.2f}, {outsider_current_pos['z']:.2f})")
+    
+            return history
 
     def _should_trigger_outsider_authentication(self, current_time: float, total_duration: float) -> bool:
         """Determine if outsider drone should appear and request authentication"""
@@ -117,8 +128,11 @@ class AirSimAdapter:
             self.outsider_authentication_attempted = True
             self.outsider_appearance_time = current_time
             
+            # Convert outsider_pos tuple to a dictionary for _generate_outsider_flight_history
+            outsider_current_pos_dict = {"x": outsider_pos[0], "y": outsider_pos[1], "z": outsider_pos[2]}
+
             # Generate outsider drone data with suspicious flight history
-            flight_history = self._generate_outsider_flight_history(current_time, outsider_start_pos)
+            flight_history = self._generate_outsider_flight_history(current_time, outsider_current_pos_dict, outsider_start_pos)
             
             outsider_data = OutsiderDroneData(
                 drone_id=f"OUTSIDER_{int(current_time * 100)}",
@@ -269,10 +283,7 @@ class AirSimAdapter:
         # Calculate the vector from start to end for the main drone
         dx = main_end['x'] - main_start['x']
         dy = main_end['y'] - main_start['y']
-        
-        # Create outsider start position at a perpendicular offset
-        # This ensures the outsider starts from a different location but can converge
-        perp_distance = 40.0  # Distance perpendicular to main flight path
+        perp_distance = 140.0  
         
         # Calculate perpendicular vector
         length = math.sqrt(dx*dx + dy*dy)

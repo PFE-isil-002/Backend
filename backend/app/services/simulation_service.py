@@ -23,6 +23,7 @@ class SimulationService(SimulationUseCase):
         self.flight_params: Dict[str, Any] = {}
         self.ai_model = None
         self.airsim_adapter.set_authentication_callback(self._authenticate_outsider_drone)
+        self.callback_for_outsider_status = None  # Initialize callback
         logger.info("SimulationService initialized")
 
     def set_ai_model(self, ai_model):
@@ -40,13 +41,24 @@ class SimulationService(SimulationUseCase):
         logger.info(" AUTHENTICATING OUTSIDER DRONE")
         logger.info(f"   Analyzing flight history of {len(auth_request.flight_history)} waypoints")
 
-        # Yield pending status
+        # Ensure flight history includes the most recent position
+        if not auth_request.flight_history or auth_request.flight_history[-1] != outsider_data.position:
+            mutable_flight_history = list(auth_request.flight_history)
+            mutable_flight_history.append(outsider_data.position)
+            auth_request.flight_history = mutable_flight_history
+            logger.info(" Added recent position to flight history.")
+            logger.info(f" Updated flight history size: {len(auth_request.flight_history)}")
+
+
+        # Yield pending status - 4 messages with 2 seconds delay
         if self.callback_for_outsider_status:
-            await self.callback_for_outsider_status({
-                "status": "pending",
-                "drone_id": auth_request.drone_id,
-                "outsider_telemetry": outsider_data.to_dict() # Assuming to_dict() method exists
-            })
+            for _ in range(4):
+                await self.callback_for_outsider_status({
+                    "status": "pending",
+                    "drone_id": auth_request.drone_id,
+                    "outsider_telemetry": outsider_data.to_dict()
+                })
+                await asyncio.sleep(2.0) # 2 seconds delay
 
         try:
             if self.ai_model is None:
@@ -54,12 +66,9 @@ class SimulationService(SimulationUseCase):
                 is_outsider = True
                 confidence = 0.95
             else:
-                # Convert outsider data to feature vector for AI model
                 feature_vector = outsider_data.to_feature_vector()
                 logger.info(f"   Feature vector size: {len(feature_vector)}")
 
-                # Use AI model to predict if this is an outsider
-                # This assumes your AI model has a predict method that returns (prediction, confidence)
                 prediction_result = await self._run_ai_prediction(feature_vector)
                 is_outsider = prediction_result.get('is_outsider', True)
                 confidence = prediction_result.get('confidence', 0.95)
@@ -68,22 +77,20 @@ class SimulationService(SimulationUseCase):
                 logger.info(f"   - Classification: {'OUTSIDER' if is_outsider else 'LEGITIMATE'}")
                 logger.info(f"   - Confidence: {confidence:.3f}")
 
-            # Create response
             auth_response = AuthenticationResponse(
                 drone_id=auth_request.drone_id,
                 is_authenticated=not is_outsider,
                 is_outsider=is_outsider,
                 confidence=confidence,
                 response_timestamp=datetime.utcnow(),
-                communication_blocked=is_outsider  # Always block if classified as outsider
+                communication_blocked=is_outsider
             )
 
-            # Log the decision
             if is_outsider:
                 logger.error(f" OUTSIDER DETECTED - Communication BLOCKED")
                 logger.error(f"   Drone {auth_request.drone_id} flagged as OUTSIDER with {confidence:.1%} confidence")
                 if self.callback_for_outsider_status:
-                    await self.callback_for_outsider_status({
+                    await self.callback_for_outsider_status({ # Only 1 message for blocked
                         "status": "blocked",
                         "drone_id": auth_request.drone_id,
                         "confidence": confidence,
@@ -93,7 +100,7 @@ class SimulationService(SimulationUseCase):
                 logger.info(f" LEGITIMATE DRONE - Communication ALLOWED")
                 logger.info(f"   Drone {auth_request.drone_id} authenticated with {confidence:.1%} confidence")
                 if self.callback_for_outsider_status:
-                    await self.callback_for_outsider_status({
+                    await self.callback_for_outsider_status({ # Only 1 message for authenticated
                         "status": "authenticated",
                         "drone_id": auth_request.drone_id,
                         "confidence": confidence,
@@ -104,14 +111,16 @@ class SimulationService(SimulationUseCase):
 
         except Exception as e:
             logger.error(f" Authentication error: {str(e)}")
-            # Default to blocking on error
+            # Default to blocking on error - 4 messages for error/unknown with 2 seconds delay
             if self.callback_for_outsider_status:
-                await self.callback_for_outsider_status({
-                    "status": "error",
-                    "drone_id": auth_request.drone_id,
-                    "message": str(e),
-                    "outsider_telemetry": outsider_data.to_dict()
-                })
+                for _ in range(4): # 4 messages for error
+                    await self.callback_for_outsider_status({
+                        "status": "error",
+                        "drone_id": auth_request.drone_id,
+                        "message": str(e),
+                        "outsider_telemetry": outsider_data.to_dict()
+                    })
+                    await asyncio.sleep(2.0) # 2 seconds delay
             return AuthenticationResponse(
                 drone_id=auth_request.drone_id,
                 is_authenticated=False,
@@ -125,34 +134,27 @@ class SimulationService(SimulationUseCase):
         """Run AI model prediction on feature vector"""
         try:
             if hasattr(self.ai_model, 'predict_async'):
-                # If model supports async prediction
                 result = await self.ai_model.predict_async(feature_vector)
             elif hasattr(self.ai_model, 'predict'):
-                # Synchronous prediction
-                result = self.ai_model.predict([feature_vector])  # Most models expect 2D array
+                result = self.ai_model.predict([feature_vector])
                 if hasattr(result, '__len__') and len(result) > 0:
-                    result = result[0]  # Get first result
+                    result = result[0]
             else:
                 raise AttributeError("AI model does not have predict method")
 
-            # Parse result based on your model's output format
-            # This is a generic implementation - adjust based on your specific AI model
             if isinstance(result, dict):
                 return result
-            elif hasattr(result, 'item'):  # numpy scalar
-                # Assume binary classification where > 0.5 means outsider
+            elif hasattr(result, 'item'):
                 confidence = float(result.item())
                 is_outsider = confidence > 0.5
                 return {'is_outsider': is_outsider, 'confidence': confidence}
             else:
-                # Default interpretation
                 confidence = float(result) if isinstance(result, (int, float)) else 0.95
                 is_outsider = confidence > 0.5
                 return {'is_outsider': is_outsider, 'confidence': confidence}
 
         except Exception as e:
             logger.error(f"AI model prediction failed: {str(e)}")
-            # Default to outsider with high confidence on error
             return {'is_outsider': True, 'confidence': 0.95}
 
     def get_outsider_status(self) -> Dict[str, Any]:
@@ -255,7 +257,7 @@ class SimulationService(SimulationUseCase):
             "velocity": velocity,
             "path_type": path_type
         }
-        self.current_simulation_type = simulation_type # Set current simulation type
+        self.current_simulation_type = simulation_type
 
         if start_point and end_point:
             logger.info(f"Starting custom path simulation: {simulation_type.value}")
@@ -299,11 +301,9 @@ class SimulationService(SimulationUseCase):
         waypoints: Optional[List[Dict[str, float]]] = None
     ) -> AsyncIterator[DroneData]:
         """Unified simulation entrypoint with support for custom path"""
-        # The logic here is fine, it will call start_simulation_with_path if points are provided
-        # or start_simulation (default) if not. The AirSimAdapter now handles None for points.
-        self.current_simulation_type = simulation_type # Set current simulation type
-        self.start_time = datetime.utcnow() # Record start time
-        self.duration = duration # Store duration
+        self.current_simulation_type = simulation_type
+        self.start_time = datetime.utcnow()
+        self.duration = duration
 
         if start_point and end_point:
             async for drone_data in self.start_simulation_with_path(
@@ -362,7 +362,6 @@ class SimulationService(SimulationUseCase):
             status["remaining_time"] = max(0, self.duration - elapsed)
             logger.debug(f"Simulation status: elapsed={elapsed:.2f}s, remaining={status['remaining_time']:.2f}")
 
-        # Add outsider status for outsider simulations
         if running and self.current_simulation_type == SimulationType.OUTSIDER:
             status["outsider_status"] = self.get_outsider_status()
 
