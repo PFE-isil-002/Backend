@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     SIMULATION_STEP: float = 0.1    # seconds
     
     # Model paths relative to BASE_DIR
-    MODEL_DIR: Path = BASE_DIR / "model/les_models"
+    MODEL_DIR: Path = BASE_DIR / "models"
     DATASET_DIR: Path = BASE_DIR / "dataset"
     
     # Simulation script paths
